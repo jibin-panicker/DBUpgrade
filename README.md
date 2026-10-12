@@ -143,3 +143,22 @@ oci db database upgrade \
 ```
 
 The response acknowledges submission, not completion. Track the new UPGRADE entry with the history command until SUCCEEDED; on FAILED or an ambiguous CLI error, inspect OCI before retrying. Then complete the acceptance and backup-restoration steps above. See [OCI upgrade command](https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/db/database/upgrade.html).
+
+
+## Run dbcli inspection through GitHub Actions
+
+The existing workflow now has a `dbcli-inspect` operation. It SSHs from the OCI runner to the database host as `opc` and runs only `list-databases`, `list-dbhomes`, and `list-jobs` with noninteractive sudo. It does not submit an upgrade or require OCI CLI authentication for this operation. For details about a specific home or job, use the manual commands above.
+
+Configure the following in the protected **oci-db-precheck** environment:
+
+| Setting | Type | Value |
+| --- | --- | --- |
+| `OCI_DBCLI_HOST` | Variable | Database host private DNS name or IPv4 address |
+| `OCI_DBCLI_SSH_PRIVATE_KEY` | Secret | SSH private key authorized for the host's `opc` account |
+| `OCI_DBCLI_KNOWN_HOSTS` | Secret | Verified OpenSSH known_hosts entry matching that hostname/IP |
+
+Verify the host-key fingerprint using your trusted provisioning record or administrator before saving the known_hosts entry. The script enforces host-key verification and removes temporary SSH credentials on exit. Do not paste keys into workflow inputs or repository files. Use an isolated runner and a private repository or restricted log access: command output contains database and job metadata.
+
+Allow SSH from the runner to the database host through your VCN/NSG rules. The runner needs an SSH client, and the host account needs noninteractive sudo permission for these three commands. This initial implementation uses direct SSH on port 22; OCI Bastion session orchestration is not included.
+
+In Actions, select **OCI Base Database 19c to 26ai**, choose the default branch, and dispatch `operation=dbcli-inspect`. Leave the other inputs empty. Approve the precheck environment request, then inspect the job log. Use `discover`, `precheck`, and `upgrade` for the existing OCI upgrade sequence. The inspection operation is independent and is not proof that the database is ready to upgrade.
