@@ -62,3 +62,84 @@ Cancellation, CLI failure or timeout may leave OCI working. Do not rerun blindly
 Run `python3 -m unittest discover -s tests -v`. The tests use simulated OCI responses and require no credentials. They exercise history correlation, failure handling and backup validation; they do not certify your tenancy, Oracle compatibility or application behavior.
 
 The runner must already have OCI CLI installed. No runtime package download or database password is used by this workflow. The CLI request shape follows [OCI database upgrade](https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/db/database/upgrade.html).
+
+## dbcli on the database host
+
+`dbcli` is the host-local tool at `/opt/oracle/dcs/bin/dbcli`; `oci` is the OCI control-plane CLI used by this workflow. They use different identifiers: dbcli UUIDs are not database OCIDs.
+
+Oracle's [Base Database upgrade documentation](https://docs.oracle.com/en/cloud/paas/base-database/upgrade-db/) states that generally available database releases cannot be upgraded using dbcli. The documented exception is customized software with an Oracle-provided pre-authenticated request (PAR) URL. For that exception, obtain the exact version-specific procedure from Oracle Support; no generic dbcli major-upgrade command is supplied here. Do not place PAR URLs in GitHub files or logs.
+
+From your laptop, connect through your approved VPN/Bastion/SSH route:
+
+```bash
+ssh -i '<SSH_PRIVATE_KEY_PATH>' opc@<DB_SYSTEM_IP>
+```
+
+On the database host, use these read-only inspection commands:
+
+```bash
+sudo /opt/oracle/dcs/bin/dbcli list-databases
+sudo /opt/oracle/dcs/bin/dbcli list-dbhomes
+sudo /opt/oracle/dcs/bin/dbcli describe-dbhome -i '<DBCLI_HOME_UUID>'
+sudo /opt/oracle/dcs/bin/dbcli list-jobs
+sudo /opt/oracle/dcs/bin/dbcli describe-job -i '<DBCLI_JOB_UUID>'
+```
+
+Take the home UUID and job UUID from their respective list output. These local jobs can help troubleshoot host-side work, but OCI upgrade history remains the workflow's completion check. See the [dbcli command reference](https://docs.oracle.com/en/cloud/paas/base-database/cli-reference/).
+
+`dbcli update-dbhome` is a patching command, not a substitute for a 19c → 26ai major-version upgrade.
+
+## Equivalent OCI CLI upgrade commands
+
+Prefer the workflow, which enforces additional checks. The following manual commands do not enforce GitHub approvals, backup freshness, topology checks or automatic history correlation. Complete the same readiness, backup and maintenance steps first. Do not run them while the workflow is operating.
+
+On your authenticated OCI runner, set the real values:
+
+```bash
+export OCI_CLI_AUTH=instance_principal
+export OCI_CLI_REGION='<OCI_REGION>'
+export UPGRADE_DATABASE_ID='<DATABASE_OCID>'
+export UPGRADE_TARGET_VERSION='<EXACT_APPROVED_26AI_VERSION>'
+```
+
+For direct use on a laptop instead, configure OCI CLI API-key authentication locally with `oci setup config`, use `export OCI_CLI_AUTH=api_key`, and set the remaining variables above. Keep the private key local and grant the corresponding OCI user the required database permissions. See [OCI CLI configuration](https://docs.oracle.com/en-us/iaas/Content/API/SDKDocs/cliinstall.htm).
+
+Create the version selection JSON without embedding credentials:
+
+```bash
+python3 - <<'PY'
+import json, os
+from pathlib import Path
+Path('upgrade-source.json').write_text(json.dumps({
+    'source': 'DB_VERSION',
+    'dbVersion': os.environ['UPGRADE_TARGET_VERSION']
+}))
+PY
+```
+
+Submit the precheck:
+
+```bash
+oci db database upgrade \
+  --database-id "$UPGRADE_DATABASE_ID" \
+  --action PRECHECK \
+  --database-upgrade-source-details file://upgrade-source.json
+```
+
+Inspect history repeatedly until the new PRECHECK entry for the requested version reaches SUCCEEDED. Check its ID and start time; do not rely on an old success:
+
+```bash
+oci db database list-upgrade-history \
+  --database-id "$UPGRADE_DATABASE_ID" --all
+```
+
+Only after that precheck succeeds, the backup is verified and the maintenance window is approved, submit the upgrade once:
+
+```bash
+oci db database upgrade \
+  --database-id "$UPGRADE_DATABASE_ID" \
+  --action UPGRADE \
+  --database-upgrade-source-details file://upgrade-source.json
+```
+
+The response acknowledges submission, not completion. Track the new UPGRADE entry with the history command until SUCCEEDED; on FAILED or an ambiguous CLI error, inspect OCI before retrying. Then complete the acceptance and backup-restoration steps above. See [OCI upgrade command](https://docs.oracle.com/en-us/iaas/tools/oci-cli/latest/oci_cli_docs/cmdref/db/database/upgrade.html).
